@@ -13,7 +13,12 @@ import '../widgets/status_badge.dart';
 /// dengan 3 snap points (0.18, 0.50, 0.90) berbasis spring physics
 /// Menampilkan pos pantau wilayah sekitar dan laporan warga terverifikasi
 class RadarMapScreen extends StatefulWidget {
-  const RadarMapScreen({super.key});
+  final ValueChanged<bool>? onMapInteractionChanged;
+
+  const RadarMapScreen({
+    super.key,
+    this.onMapInteractionChanged,
+  });
 
   @override
   State<RadarMapScreen> createState() => _RadarMapScreenState();
@@ -311,6 +316,7 @@ class _RadarMapScreenState extends State<RadarMapScreen> {
               onSelectReport: _onSelectReport,
               focusTrigger: _focusTrigger,
               bottomSheetExtent: _sheetExtent,
+              onMapInteractionChanged: widget.onMapInteractionChanged,
             ),
           ),
 
@@ -318,61 +324,74 @@ class _RadarMapScreenState extends State<RadarMapScreen> {
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(18, 12, 18, 0),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: const [AppColors.floatingShadow],
-                  border: Border.all(
-                    color: const Color(0x0F000000),
-                    width: 1,
-                  ),
-                ),
-                child: TextField(
-                  controller: _searchController,
-                  onChanged: _onSearchChanged,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  decoration: InputDecoration(
-                    hintText: 'Cari wilayah / pos pantau...',
-                    hintStyle: const TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 14,
+              child: Listener(
+                behavior: HitTestBehavior.translucent,
+                onPointerDown: (_) =>
+                    widget.onMapInteractionChanged?.call(true),
+                onPointerUp: (_) =>
+                    widget.onMapInteractionChanged?.call(false),
+                onPointerCancel: (_) =>
+                    widget.onMapInteractionChanged?.call(false),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragUpdate: (_) {},
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: const [AppColors.floatingShadow],
+                      border: Border.all(
+                        color: const Color(0x0F000000),
+                        width: 1,
+                      ),
                     ),
-                    prefixIcon: const Icon(
-                      Icons.search_rounded,
-                      color: AppColors.textSecondary,
-                      size: 22,
-                    ),
-                    suffixIcon: _searchController.text.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear_rounded, size: 18),
-                            color: AppColors.textSecondary,
-                            onPressed: () {
-                              _searchController.clear();
-                              _onSearchChanged('');
-                            },
-                          )
-                        : const Padding(
-                            padding: EdgeInsets.only(right: 12),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  Icons.tune_rounded,
-                                  size: 18,
-                                  color: AppColors.textSecondary,
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: _onSearchChanged,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: AppColors.textPrimary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: 'Cari wilayah / pos pantau...',
+                        hintStyle: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 14,
+                        ),
+                        prefixIcon: const Icon(
+                          Icons.search_rounded,
+                          color: AppColors.textSecondary,
+                          size: 22,
+                        ),
+                        suffixIcon: _searchController.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear_rounded, size: 18),
+                                color: AppColors.textSecondary,
+                                onPressed: () {
+                                  _searchController.clear();
+                                  _onSearchChanged('');
+                                },
+                              )
+                            : const Padding(
+                                padding: EdgeInsets.only(right: 12),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.tune_rounded,
+                                      size: 18,
+                                      color: AppColors.textSecondary,
+                                    ),
+                                  ],
                                 ),
-                              ],
-                            ),
-                          ),
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 14,
+                              ),
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 14,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -384,7 +403,7 @@ class _RadarMapScreenState extends State<RadarMapScreen> {
           // 3 Snap Points: 0.18 (Peek), 0.50 (Half), 0.90 (Full)
           NotificationListener<DraggableScrollableNotification>(
             onNotification: (notification) {
-              if ((_sheetExtent - notification.extent).abs() > 0.005) {
+              if ((_sheetExtent - notification.extent).abs() > 0.0005) {
                 setState(() {
                   _sheetExtent = notification.extent;
                 });
@@ -399,15 +418,21 @@ class _RadarMapScreenState extends State<RadarMapScreen> {
               snap: true,
               snapSizes: const [0.18, 0.50, 0.90],
               builder: (context, scrollController) {
-                return Container(
-                decoration: const BoxDecoration(
-                  color: AppColors.cardSurface,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-                  boxShadow: [AppColors.floatingShadow],
-                ),
-                child: ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 32),
+                return Listener(
+                  key: const ValueKey('surrounding-conditions-sheet'),
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: (_) =>
+                      widget.onMapInteractionChanged?.call(false),
+                  child: Container(
+                    decoration: const BoxDecoration(
+                      color: AppColors.cardSurface,
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(28)),
+                      boxShadow: [AppColors.floatingShadow],
+                    ),
+                    child: ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(20, 10, 20, 32),
                   children: [
                     // Handle Bar
                     Center(
@@ -538,7 +563,8 @@ class _RadarMapScreenState extends State<RadarMapScreen> {
                     ],
                   ],
                 ),
-              );
+                  ),
+                );
               },
             ),
           ),

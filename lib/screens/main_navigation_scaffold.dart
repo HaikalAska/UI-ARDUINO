@@ -14,6 +14,7 @@ class MainNavigationScaffold extends StatefulWidget {
 
 class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
   int _currentIndex = 0;
+  bool _isMapInteracting = false;
   final PageController _pageController = PageController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -26,13 +27,20 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
   void _goToPage(int index) {
     if (index >= 0 && index < 3) {
       HapticFeedback.lightImpact();
-      setState(() => _currentIndex = index);
+      _isMapInteracting = false;
+      setState(() {
+        _currentIndex = index;
+      });
       _pageController.animateToPage(
         index,
         duration: const Duration(milliseconds: 350),
         curve: Curves.easeOutCubic,
       );
     }
+  }
+
+  void _handleMapInteractionChanged(bool isInteracting) {
+    _isMapInteracting = isInteracting;
   }
 
   @override
@@ -43,17 +51,24 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
       drawer: _buildAppDrawer(),
       body: PageView(
         controller: _pageController,
-        physics: const BouncingScrollPhysics(),
+        physics: _MapAwarePageScrollPhysics(
+          isMapInteracting: () => _isMapInteracting,
+        ),
         onPageChanged: (index) {
           HapticFeedback.selectionClick();
-          setState(() => _currentIndex = index);
+          _isMapInteracting = false;
+          setState(() {
+            _currentIndex = index;
+          });
         },
         children: [
           HomeDashboardScreen(
             onOpenMenu: () => _scaffoldKey.currentState?.openDrawer(),
             onNavigateToPage: _goToPage,
           ),
-          const RadarMapScreen(),
+          RadarMapScreen(
+            onMapInteractionChanged: _handleMapInteractionChanged,
+          ),
           const CitizenReportScreen(),
         ],
       ),
@@ -264,3 +279,43 @@ class _MainNavigationScaffoldState extends State<MainNavigationScaffold> {
     );
   }
 }
+
+class _MapAwarePageScrollPhysics extends BouncingScrollPhysics {
+  final bool Function() isMapInteracting;
+
+  const _MapAwarePageScrollPhysics({
+    required this.isMapInteracting,
+    super.parent,
+  });
+
+  @override
+  _MapAwarePageScrollPhysics applyTo(ScrollPhysics? ancestor) {
+    return _MapAwarePageScrollPhysics(
+      isMapInteracting: isMapInteracting,
+      parent: buildParent(ancestor),
+    );
+  }
+
+  @override
+  bool shouldAcceptUserOffset(ScrollMetrics position) => true;
+
+  @override
+  double applyPhysicsToUserOffset(ScrollMetrics position, double offset) {
+    if (isMapInteracting()) {
+      return 0.0;
+    }
+    return super.applyPhysicsToUserOffset(position, offset);
+  }
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) {
+    if (isMapInteracting()) {
+      return super.createBallisticSimulation(position, 0.0);
+    }
+    return super.createBallisticSimulation(position, velocity);
+  }
+}
+

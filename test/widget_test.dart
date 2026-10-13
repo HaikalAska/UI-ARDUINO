@@ -903,9 +903,268 @@ void main() {
         expect(ArduinoSensorService.soilMoisture, 55);
       }, _RealNetworkHttpOverrides());
     });
+
+    testWidgets(
+        'Layar 3 Gesture Isolation: Horizontal/vertical drag & zoom on map pans map without switching tabs, while horizontal drag on Kondisi Wilayah Sekitar switches tabs',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(const ThaliaApp());
+      await settle(tester);
+
+      // Navigate to Radar Peta (Tab 1) via Dot 1
+      await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
+      await settle(tester);
+
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+      expect(find.text('Kondisi Wilayah Sekitar'), findsOneWidget);
+
+      final mapState = tester.state<InteractiveMapCanvasState>(
+        find.byType(InteractiveMapCanvas),
+      );
+      final initialLat = mapState.centerLat;
+      final initialLng = mapState.centerLng;
+      final initialZoom = mapState.zoom;
+      expect(initialLat, closeTo(MapConfig.initialCenterLat, 0.0001));
+      final initialGpsScreenPos = tester.getCenter(
+        find.byKey(const ValueKey('user-gps-pin')),
+      );
+
+      // 1. Drag LEFT on the Map Area (top half, y = 450) -> pans map east, stays on Radar Peta
+      await tester.dragFrom(const Offset(750, 450), const Offset(-400, 0));
+      await settle(tester);
+
+      expect(mapState.centerLng, greaterThan(initialLng));
+      final afterLeftDragGpsPos = tester.getCenter(
+        find.byKey(const ValueKey('user-gps-pin')),
+      );
+      expect(afterLeftDragGpsPos.dx, lessThan(initialGpsScreenPos.dx));
+      // Must NOT switch to Lapor Warga
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+      expect(find.text('Kirim Laporan & Kunci ke Blockchain'), findsNothing);
+
+      // 2. Fast horizontal FLING RIGHT on the Map Area (y = 450) -> pans map west, stays on Radar Peta
+      final lngBeforeRightFling = mapState.centerLng;
+      await tester.flingFrom(
+        const Offset(250, 450),
+        const Offset(550, 0),
+        1200,
+      );
+      await settle(tester);
+
+      expect(mapState.centerLng, lessThan(lngBeforeRightFling));
+      // Must NOT switch to Beranda
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+      expect(find.text('28°'), findsNothing);
+
+      // 3. Drag UP and DOWN on the Map Area -> pans map vertically, stays on Radar Peta
+      final latBeforeUpDrag = mapState.centerLat;
+      await tester.dragFrom(const Offset(540, 500), const Offset(0, -250));
+      await settle(tester);
+      expect(mapState.centerLat, lessThan(latBeforeUpDrag));
+
+      final latBeforeDownDrag = mapState.centerLat;
+      await tester.dragFrom(const Offset(540, 350), const Offset(0, 250));
+      await settle(tester);
+      expect(mapState.centerLat, greaterThan(latBeforeDownDrag));
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+
+      // 4. Two-finger pinch ZOOM IN and ZOOM OUT on the Map Area
+      const pinchCenter = Offset(540, 480);
+      final p1 = await tester.startGesture(pinchCenter - const Offset(50, 0));
+      final p2 = await tester.startGesture(pinchCenter + const Offset(50, 0));
+      await tester.pump();
+      await p1.moveTo(pinchCenter - const Offset(150, 0));
+      await p2.moveTo(pinchCenter + const Offset(150, 0));
+      await tester.pump(const Duration(milliseconds: 50));
+      await p1.up();
+      await p2.up();
+      await settle(tester);
+
+      final zoomedInLevel = mapState.zoom;
+      expect(zoomedInLevel, greaterThan(initialZoom));
+
+      final p3 = await tester.startGesture(pinchCenter - const Offset(150, 0));
+      final p4 = await tester.startGesture(pinchCenter + const Offset(150, 0));
+      await tester.pump();
+      await p3.moveTo(pinchCenter - const Offset(60, 0));
+      await p4.moveTo(pinchCenter + const Offset(60, 0));
+      await tester.pump(const Duration(milliseconds: 50));
+      await p3.up();
+      await p4.up();
+      await settle(tester);
+
+      expect(mapState.zoom, lessThan(zoomedInLevel));
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+
+      // 5. Horizontal swipe LEFT on "Kondisi Wilayah Sekitar" Bottom Sheet -> switches tab to Lapor Warga
+      await tester.fling(
+        find.byKey(const ValueKey('surrounding-conditions-sheet')),
+        const Offset(-600, 0),
+        1000,
+      );
+      await settle(tester);
+      expect(find.text('Lapor Warga'), findsOneWidget);
+      expect(find.text('Kirim Laporan & Kunci ke Blockchain'), findsOneWidget);
+
+      // Return to Radar Peta
+      await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
+      await settle(tester);
+      expect(find.text('Kondisi Wilayah Sekitar'), findsOneWidget);
+
+      // 6. Horizontal swipe RIGHT on "Kondisi Wilayah Sekitar" Bottom Sheet -> switches tab to Beranda
+      await tester.fling(
+        find.byKey(const ValueKey('surrounding-conditions-sheet')),
+        const Offset(600, 0),
+        1000,
+      );
+      await settle(tester);
+      expect(find.text('28°'), findsOneWidget);
+      expect(find.text('Bantaran Ciliwung, Jkt'), findsOneWidget);
+    });
+
+    testWidgets(
+        'Layar 3 Gesture Edge Cases: Focal-point zoom anchoring, finger-roll tap vs drag on pins, boundary strip above sheet, search bar drag, and 0ms map-to-sheet transition',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(const ThaliaApp());
+      await settle(tester);
+
+      // Navigate to Radar Peta via Dot 1
+      await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
+      await settle(tester);
+
+      final mapFinder = find.byType(InteractiveMapCanvas);
+      final mapState = tester.state<InteractiveMapCanvasState>(mapFinder);
+      final RenderBox mapBox = tester.renderObject(mapFinder);
+      final Offset mapDefaultFocal = Offset(
+        mapBox.size.width * 0.50,
+        mapBox.size.height * 0.28,
+      );
+
+      // 1. True Focal-Point Pinch Zoom:
+      // Pinch at an off-center point (760, 420) far from mapDefaultFocal (540, 672)
+      const Offset offCenterPinch = Offset(760, 420);
+      final double preZoom = mapState.zoom;
+      final Offset preCenterWorld = InteractiveMapCanvas.latLngToWorldPixel(
+        mapState.centerLat,
+        mapState.centerLng,
+        preZoom,
+      );
+      final Offset preAnchorWorld =
+          preCenterWorld + (offCenterPinch - mapDefaultFocal);
+      final (double anchorLat, double anchorLng) =
+          InteractiveMapCanvas.worldPixelToLatLng(
+        preAnchorWorld.dx,
+        preAnchorWorld.dy,
+        preZoom,
+      );
+
+      final fp1 =
+          await tester.startGesture(offCenterPinch - const Offset(50, 0));
+      final fp2 =
+          await tester.startGesture(offCenterPinch + const Offset(50, 0));
+      await tester.pump();
+      await fp1.moveTo(offCenterPinch - const Offset(100, 0));
+      await fp2.moveTo(offCenterPinch + const Offset(100, 0));
+      await tester.pump(const Duration(milliseconds: 16));
+      // Lift one finger before the other to verify no jump or spurious sideways fling
+      await fp1.up();
+      await tester.pump(const Duration(milliseconds: 16));
+      await fp2.moveBy(const Offset(2, 0));
+      await tester.pump(const Duration(milliseconds: 16));
+      await fp2.up();
+      await settle(tester);
+
+      expect(mapState.zoom, closeTo(preZoom + 1.0, 0.05));
+      // Verify the geographic coordinate under offCenterPinch stayed anchored at offCenterPinch!
+      final Offset postCenterWorld = InteractiveMapCanvas.latLngToWorldPixel(
+        mapState.centerLat,
+        mapState.centerLng,
+        mapState.zoom,
+      );
+      final Offset postAnchorWorld = InteractiveMapCanvas.latLngToWorldPixel(
+        anchorLat,
+        anchorLng,
+        mapState.zoom,
+      );
+      final Offset postAnchorScreen =
+          mapDefaultFocal + (postAnchorWorld - postCenterWorld);
+      expect(postAnchorScreen.dx, closeTo(offCenterPinch.dx, 1.5));
+      expect(postAnchorScreen.dy, closeTo(offCenterPinch.dy, 1.5));
+
+      // Reset overview
+      await tester.tap(find.byKey(const ValueKey('map-reset-overview-badge')));
+      await settle(tester);
+
+      // 2. Natural human tap with ~5px finger roll on a Station Pin and Layer Button STILL triggers onTap
+      final Offset layerBtnCenter = tester.getCenter(
+        find.byKey(const ValueKey('map-layer-switch-button')),
+      );
+      final TestGesture rolledTap = await tester.startGesture(layerBtnCenter);
+      await tester.pump(const Duration(milliseconds: 16));
+      await rolledTap.moveBy(const Offset(5.0, 2.0)); // 5.38px natural thumb roll
+      await tester.pump(const Duration(milliseconds: 16));
+      await rolledTap.up();
+      await settle(tester);
+      expect(find.text('Nordic Light'), findsOneWidget);
+
+      // 3. Starting a horizontal drag directly on top of a Station Pin pans the map without switching tabs
+      final Offset jaktimPinCenter = tester.getCenter(
+        find.byKey(const ValueKey('map-station-pin-node-jaktim')),
+      );
+      final double lngBeforePinDrag = mapState.centerLng;
+      await tester.dragFrom(jaktimPinCenter, const Offset(-320, 0));
+      await settle(tester);
+      expect(mapState.centerLng, greaterThan(lngBeforePinDrag));
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+
+      // 4. Dragging horizontally on the visible map right above the Bottom Sheet border (12px above sheet top at mapBox.size.height * 0.50)
+      final double sheetTopY = mapBox.size.height * 0.50;
+      final double lngBeforeBoundaryDrag = mapState.centerLng;
+      await tester.dragFrom(
+        Offset(750, sheetTopY - 12),
+        const Offset(-350, 0),
+      );
+      await settle(tester);
+      expect(mapState.centerLng, greaterThan(lngBeforeBoundaryDrag));
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+
+      // 5. Dragging horizontally across the Floating Search Bar at the top of the map does NOT switch PageView tabs
+      await tester.flingFrom(
+        const Offset(750, 48),
+        const Offset(-500, 0),
+        1200,
+      );
+      await settle(tester);
+      expect(find.text('Cari wilayah / pos pantau...'), findsOneWidget);
+      expect(find.text('Kirim Laporan & Kunci ke Blockchain'), findsNothing);
+
+      // 6. Same-frame (0ms) transition: release map pointer and immediately start horizontal swipe on Bottom Sheet without intermediate frame
+      final TestGesture mapTouch =
+          await tester.startGesture(const Offset(540, 450));
+      await mapTouch.moveBy(const Offset(-80, 0));
+      await mapTouch.up();
+      // Immediately (before any tester.pump() frame rebuild!) fling the Bottom Sheet left
+      await tester.fling(
+        find.byKey(const ValueKey('surrounding-conditions-sheet')),
+        const Offset(-600, 0),
+        1000,
+      );
+      await settle(tester);
+      expect(find.text('Lapor Warga'), findsOneWidget);
+      expect(find.text('Kirim Laporan & Kunci ke Blockchain'), findsOneWidget);
+    });
   });
 }
 
 class _RealNetworkHttpOverrides extends HttpOverrides {}
+
+
 
 
