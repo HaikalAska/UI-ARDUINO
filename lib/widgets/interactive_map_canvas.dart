@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../config/map_config.dart';
@@ -20,6 +21,7 @@ class InteractiveMapCanvas extends StatefulWidget {
   final ValueChanged<CitizenReport>? onSelectReport;
   final int focusTrigger;
   final double bottomSheetExtent;
+  final ValueChanged<bool>? onMapInteractionChanged;
 
   const InteractiveMapCanvas({
     super.key,
@@ -31,6 +33,7 @@ class InteractiveMapCanvas extends StatefulWidget {
     this.onSelectReport,
     this.focusTrigger = 0,
     this.bottomSheetExtent = 0.50,
+    this.onMapInteractionChanged,
   });
 
   /// Proyeksi Web Mercator (EPSG:3857): Latitude/Longitude ke koordinat piksel dunia
@@ -61,16 +64,20 @@ class InteractiveMapCanvas extends StatefulWidget {
   }
 
   @override
-  State<InteractiveMapCanvas> createState() => _InteractiveMapCanvasState();
+  InteractiveMapCanvasState createState() => InteractiveMapCanvasState();
 }
 
-class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
+class InteractiveMapCanvasState extends State<InteractiveMapCanvas>
     with SingleTickerProviderStateMixin {
   MapTileStyle _layerStyle = MapTileStyle.googleStandard;
 
   double _centerLat = MapConfig.initialCenterLat;
   double _centerLng = MapConfig.initialCenterLng;
   double _zoom = MapConfig.initialZoom;
+
+  double get centerLat => _centerLat;
+  double get centerLng => _centerLng;
+  double get zoom => _zoom;
 
   late final AnimationController _cameraController;
   double _animStartLat = MapConfig.initialCenterLat;
@@ -82,6 +89,13 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
 
   Offset? _lastFocalPoint;
   double? _scaleStartZoom;
+  int _lastPointerCount = 0;
+  bool _hadMultiTouchInGesture = false;
+  final Set<int> _activeMapPointers = <int>{};
+  final Set<int> _backgroundPointers = <int>{};
+  DateTime? _lastBgTapTime;
+  Offset? _lastBgTapPos;
+  Offset? _bgDownPos;
 
   @override
   void initState() {
@@ -144,6 +158,8 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
 
   @override
   void dispose() {
+    _activeMapPointers.clear();
+    _backgroundPointers.clear();
     _cameraController.dispose();
     super.dispose();
   }
@@ -174,6 +190,39 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
     );
   }
 
+  void _zoomAtPoint(
+    double delta,
+    Offset localPoint,
+    BoxConstraints constraints,
+  ) {
+    HapticFeedback.lightImpact();
+    final targetZoom = (_zoom + delta).clamp(10.5, 17.5);
+    if ((targetZoom - _zoom).abs() < 1e-4) return;
+    final focal = _focalPoint(constraints);
+    final oldCenterWorld = InteractiveMapCanvas.latLngToWorldPixel(
+      _centerLat,
+      _centerLng,
+      _zoom,
+    );
+    final anchorWorldOld = oldCenterWorld + (localPoint - focal);
+    final zoomScale = math.pow(2.0, targetZoom - _zoom).toDouble();
+    final anchorWorldNew = Offset(
+      anchorWorldOld.dx * zoomScale,
+      anchorWorldOld.dy * zoomScale,
+    );
+    final newCenterWorld = anchorWorldNew - (localPoint - focal);
+    final targetLatLng = InteractiveMapCanvas.worldPixelToLatLng(
+      newCenterWorld.dx,
+      newCenterWorld.dy,
+      targetZoom,
+    );
+    _animateCameraTo(
+      lat: targetLatLng.$1,
+      lng: targetLatLng.$2,
+      targetZoom: targetZoom,
+    );
+  }
+
   void _recenterToUserGps() {
     HapticFeedback.lightImpact();
     _animateCameraTo(
@@ -190,6 +239,136 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
       lng: MapConfig.initialCenterLng,
       targetZoom: MapConfig.initialZoom,
     );
+  }
+
+  /// Tinggi area kanvas peta aktif tepat di atas batas atas Bottom Sheet "Kondisi Wilayah Sekitar"
+  double _mapViewportHeight(BoxConstraints constraints) {
+    return (1.0 - widget.bottomSheetExtent)
+            .clamp(0.05, 1.0) *
+        constraints.maxHeight;
+  }
+
+  void _onMapPointerDown(PointerDownEvent event, BoxConstraints constraints) {
+    if (event.localPosition.dy <= _mapViewportHeight(constraints)) {
+      if (_activeMapPointers.isEmpty) {
+        _hadMultiTouchInGesture = false;
+      }
+      _activeMapPointers.add(event.pointer);
+      if (_activeMapPointers.length >= 2) {
+        _hadMultiTouchInGesture = true;
+      }
+      widget.onMapInteractionChanged?.call(true);
+    }
+  }
+
+  void _onMapPointerUpOrCancel(PointerEvent event) {
+    _backgroundPointers.remove(event.pointer);
+    if (_activeMapPointers.remove(event.pointer) &&
+        _activeMapPointers.isEmpty) {
+      widget.onMapInteractionChanged?.call(false);
+    }
+  }
+
+  void _handleScaleStart(ScaleStartDetails details) {
+    _cameraController.stop();
+    _lastFocalPoint = details.localFocalPoint;
+    _scaleStartZoom = _zoom;
+    _lastPointerCount = details.pointerCount;
+    if (details.pointerCount >= 2 || _activeMapPointers.length >= 2) {
+      _hadMultiTouchInGesture = true;
+    }
+  }
+
+  void _handleScaleUpdate(
+    ScaleUpdateDetails details,
+    BoxConstraints constraints,
+  ) {
+    if (details.pointerCount >= 2 || _activeMapPointers.length >= 2) {
+      _hadMultiTouchInGesture = true;
+    }
+    if (_lastFocalPoint == null || details.pointerCount != _lastPointerCount) {
+      _lastFocalPoint = details.localFocalPoint;
+      _lastPointerCount = details.pointerCount;
+      return;
+    }
+
+    final prevFocal = _lastFocalPoint!;
+    final currFocal = details.localFocalPoint;
+    _lastFocalPoint = currFocal;
+    _lastPointerCount = details.pointerCount;
+
+    final focal = _focalPoint(constraints);
+    final oldZoom = _zoom;
+    double newZoom = _zoom;
+    if (_scaleStartZoom != null &&
+        details.scale > 0.0 &&
+        (details.pointerCount >= 2 ||
+            (details.scale - 1.0).abs() > 1e-4)) {
+      newZoom = (_scaleStartZoom! + math.log(details.scale) / math.ln2)
+          .clamp(10.5, 17.5);
+    }
+
+    final oldCenterWorld = InteractiveMapCanvas.latLngToWorldPixel(
+      _centerLat,
+      _centerLng,
+      oldZoom,
+    );
+    // Jaga agar titik geografis tepat di bawah jari/cubitan pengguna (prevFocal -> currFocal)
+    // tetap terkunci secara presisi saat melakukan pan 360 derajat maupun focal-point pinch zoom.
+    final anchorWorldOld = oldCenterWorld + (prevFocal - focal);
+    final zoomScale = math.pow(2.0, newZoom - oldZoom).toDouble();
+    final anchorWorldNew = Offset(
+      anchorWorldOld.dx * zoomScale,
+      anchorWorldOld.dy * zoomScale,
+    );
+    final newCenterWorld = anchorWorldNew - (currFocal - focal);
+    final updated = InteractiveMapCanvas.worldPixelToLatLng(
+      newCenterWorld.dx,
+      newCenterWorld.dy,
+      newZoom,
+    );
+
+    setState(() {
+      _zoom = newZoom;
+      _centerLat = updated.$1.clamp(-6.45, -6.00);
+      _centerLng = updated.$2.clamp(106.60, 107.05);
+    });
+  }
+
+  void _handleScaleEnd(ScaleEndDetails details) {
+    final wasMultiTouch = _hadMultiTouchInGesture ||
+        details.pointerCount > 0 ||
+        _activeMapPointers.isNotEmpty;
+    _lastFocalPoint = null;
+    _scaleStartZoom = null;
+    _lastPointerCount = 0;
+    if (_activeMapPointers.isEmpty) {
+      _hadMultiTouchInGesture = false;
+    }
+
+    // Inertia momentum halus khusus saat pengguna selesai melakukan flick/geser 1 jari di peta
+    if (wasMultiTouch) return;
+    final velocity = details.velocity.pixelsPerSecond;
+    final speed = velocity.distance;
+    if (speed > 180.0) {
+      final double clampedFactor = math.min(speed, 2200.0) / speed;
+      final Offset glideDelta = velocity * clampedFactor * 0.07;
+      final centerWorld = InteractiveMapCanvas.latLngToWorldPixel(
+        _centerLat,
+        _centerLng,
+        _zoom,
+      );
+      final target = InteractiveMapCanvas.worldPixelToLatLng(
+        centerWorld.dx - glideDelta.dx,
+        centerWorld.dy - glideDelta.dy,
+        _zoom,
+      );
+      _animateCameraTo(
+        lat: target.$1,
+        lng: target.$2,
+        targetZoom: _zoom,
+      );
+    }
   }
 
   /// Titik fokus visual di bagian atas layar (di atas Bottom Sheet 50%)
@@ -228,6 +407,7 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
     return LayoutBuilder(
       builder: (context, constraints) {
         final focal = _focalPoint(constraints);
+        final mapViewportHeight = _mapViewportHeight(constraints);
         final userGpsScreen = _latLngToScreen(
           MapConfig.userGpsLat,
           MapConfig.userGpsLng,
@@ -235,76 +415,100 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
         );
 
         return ClipRect(
-          child: Stack(
-            children: [
-              // 1. Geographically Projected Fallback Vector Canvas (Sungai Ciliwung & Jalan Utama DKI Jakarta)
-              // Selalu tampil mulus saat tile sedang dimuat atau saat mode offline / flutter test
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _JakartaGeoVectorPainter(
-                    centerLat: _centerLat,
-                    centerLng: _centerLng,
-                    zoom: _zoom,
-                    focalPoint: focal,
-                    layerStyle: _layerStyle,
-                  ),
-                ),
-              ),
-
-              // 2. Real Slippy Map Tile Grid (Google Maps / CartoDB Light / Google Hybrid)
-              ..._buildVisibleTiles(constraints, focal),
-
-              // 3. Area Interaksi Geser & Cubit Peta di Bagian Atas (di atas Bottom Sheet)
-              // Menyesuaikan tinggi area peta secara dinamis ketika Bottom Sheet diciutkan (0.18)
-              // maupun saat setengah layar (0.50 -> 48% atas layar) agar swipe PageView tetap mulus
-              Positioned(
-                key: const ValueKey('map-gesture-viewport'),
-                top: 0,
-                left: 0,
-                right: 0,
-                height: (1.0 - widget.bottomSheetExtent - 0.02)
-                        .clamp(0.10, 0.82) *
-                    constraints.maxHeight,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onScaleStart: (details) {
-                    _cameraController.stop();
-                    _lastFocalPoint = details.localFocalPoint;
-                    _scaleStartZoom = _zoom;
-                  },
-                  onScaleUpdate: (details) {
-                    if (_lastFocalPoint == null) return;
-                    final delta = details.localFocalPoint - _lastFocalPoint!;
-                    _lastFocalPoint = details.localFocalPoint;
-
-                    setState(() {
-                      if (_scaleStartZoom != null &&
-                          details.scale > 0.0 &&
-                          (details.pointerCount >= 2 ||
-                              (details.scale - 1.0).abs() > 1e-4)) {
-                        _zoom = (_scaleStartZoom! +
-                                math.log(details.scale) / math.ln2)
-                            .clamp(10.5, 17.5);
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (e) => _onMapPointerDown(e, constraints),
+            onPointerUp: _onMapPointerUpOrCancel,
+            onPointerCancel: _onMapPointerUpOrCancel,
+            child: RawGestureDetector(
+              behavior: HitTestBehavior.translucent,
+              gestures: <Type, GestureRecognizerFactory>{
+                _MapScaleGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+                    _MapScaleGestureRecognizer>(
+                  () => _MapScaleGestureRecognizer(debugOwner: this),
+                  (_MapScaleGestureRecognizer instance) {
+                    instance
+                      ..isPointAllowed = (Offset globalPosition) {
+                        final renderBox =
+                            context.findRenderObject() as RenderBox?;
+                        if (renderBox == null || !renderBox.hasSize) {
+                          return true;
+                        }
+                        final local = renderBox.globalToLocal(globalPosition);
+                        return local.dy <= mapViewportHeight;
                       }
-                      final centerWorld =
-                          InteractiveMapCanvas.latLngToWorldPixel(
-                        _centerLat,
-                        _centerLng,
-                        _zoom,
-                      );
-                      final updated =
-                          InteractiveMapCanvas.worldPixelToLatLng(
-                        centerWorld.dx - delta.dx,
-                        centerWorld.dy - delta.dy,
-                        _zoom,
-                      );
-                      _centerLat = updated.$1.clamp(-6.45, -6.00);
-                      _centerLng = updated.$2.clamp(106.60, 107.05);
-                    });
+                      ..isBackgroundPointer =
+                          ((int pointer) => _backgroundPointers.contains(pointer))
+                      ..onStart = _handleScaleStart
+                      ..onUpdate =
+                          ((details) => _handleScaleUpdate(details, constraints))
+                      ..onEnd = _handleScaleEnd
+                      ..dragStartBehavior = DragStartBehavior.down;
                   },
-                  onDoubleTap: () => _zoomBy(1.0),
                 ),
-              ),
+              },
+              child: Stack(
+                children: [
+                  // 1. Geographically Projected Fallback Vector Canvas (Sungai Ciliwung & Jalan Utama DKI Jakarta)
+                  // Selalu tampil mulus saat tile sedang dimuat atau saat mode offline / flutter test
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _JakartaGeoVectorPainter(
+                        centerLat: _centerLat,
+                        centerLng: _centerLng,
+                        zoom: _zoom,
+                        focalPoint: focal,
+                        layerStyle: _layerStyle,
+                      ),
+                    ),
+                  ),
+
+                  // 2. Real Slippy Map Tile Grid (Google Maps / CartoDB Light / Google Hybrid)
+                  ..._buildVisibleTiles(constraints, focal),
+
+                  // 3. Area Interaksi Geser & Cubit Peta di Bagian Atas (di atas Bottom Sheet)
+                  // Menyesuaikan tinggi area peta secara dinamis ketika Bottom Sheet diciutkan (0.18)
+                  // maupun saat setengah layar (0.50) agar swipe PageView di Bottom Sheet tetap mulus
+                  Positioned(
+                    key: const ValueKey('map-gesture-viewport'),
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: mapViewportHeight,
+                    child: Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: (event) {
+                        _backgroundPointers.add(event.pointer);
+                        _bgDownPos = event.localPosition;
+                      },
+                      onPointerCancel: (event) {
+                        _backgroundPointers.remove(event.pointer);
+                      },
+                      onPointerUp: (event) {
+                        _backgroundPointers.remove(event.pointer);
+                        final downPos = _bgDownPos;
+                        _bgDownPos = null;
+                        if (downPos != null &&
+                            (event.localPosition - downPos).distance < 12.0) {
+                          final now = DateTime.now();
+                          if (_lastBgTapTime != null &&
+                              _lastBgTapPos != null &&
+                              now.difference(_lastBgTapTime!).inMilliseconds <
+                                  280 &&
+                              (event.localPosition - _lastBgTapPos!).distance <
+                                  36.0) {
+                            _lastBgTapTime = null;
+                            _lastBgTapPos = null;
+                            _zoomAtPoint(1.0, event.localPosition, constraints);
+                          } else {
+                            _lastBgTapTime = now;
+                            _lastBgTapPos = event.localPosition;
+                          }
+                        }
+                      },
+                      child: const ColoredBox(color: Colors.transparent),
+                    ),
+                  ),
 
               // 4. Pin Stasiun Pemantau Wilayah Sekitar (Tidak Terpilih)
               ...widget.stations
@@ -516,7 +720,9 @@ class _InteractiveMapCanvasState extends State<InteractiveMapCanvas>
                   ),
                 ),
               ),
-            ],
+                ],
+              ),
+            ),
           ),
         );
       },
@@ -1003,3 +1209,71 @@ class _JakartaGeoVectorPainter extends CustomPainter {
         oldDelegate.layerStyle != layerStyle;
   }
 }
+
+/// Custom ScaleGestureRecognizer untuk kanvas peta agar gestur geser 1 jari
+/// (kanan, kiri, atas, bawah) dan cubit zoom 2 jari selalu memenangkan Gesture Arena
+/// melawan HorizontalDragGestureRecognizer milik PageView tanpa mengganggu onTap pin.
+class _MapScaleGestureRecognizer extends ScaleGestureRecognizer {
+  _MapScaleGestureRecognizer({super.debugOwner});
+
+  bool Function(Offset globalPosition)? isPointAllowed;
+  bool Function(int pointer)? isBackgroundPointer;
+  final Map<int, Offset> _downPositions = <int, Offset>{};
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (isPointAllowed != null && !isPointAllowed!(event.position)) {
+      return;
+    }
+    super.addAllowedPointer(event);
+    _downPositions[event.pointer] = event.position;
+  }
+
+  void _acceptAndStart(int pointer) {
+    resolve(GestureDisposition.accepted);
+    acceptGesture(pointer);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerDownEvent) {
+      super.handleEvent(event);
+      if (_downPositions.length >= 2) {
+        _acceptNowForAll();
+      }
+      return;
+    }
+    if (event is PointerMoveEvent) {
+      final initial = _downPositions[event.pointer];
+      final isBg = isBackgroundPointer?.call(event.pointer) ?? true;
+      // Di area latar peta: langsung tangkap geseran sejak >= 1.0px (0 deadzone).
+      // Di atas pin / tombol kontrol peta: beri toleransi 10.0px (< kTouchSlop 18px)
+      // agar ketukan (tap) jari manusia di layar sentuh fisik tetap memicu onTap,
+      // namun geseran >= 10.0px tetap memenangkan Gesture Arena melawan PageView.
+      final slopThreshold = isBg ? 1.0 : 10.0;
+      if (_downPositions.length >= 2 ||
+          (initial != null &&
+              (event.position - initial).distance >= slopThreshold)) {
+        _acceptAndStart(event.pointer);
+      }
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _downPositions.remove(event.pointer);
+    }
+    super.handleEvent(event);
+  }
+
+  void _acceptNowForAll() {
+    resolve(GestureDisposition.accepted);
+    for (final pointer in _downPositions.keys) {
+      acceptGesture(pointer);
+    }
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _downPositions.clear();
+    super.didStopTrackingLastPointer(pointer);
+  }
+}
+
+
